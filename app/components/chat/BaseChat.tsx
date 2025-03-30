@@ -1,6 +1,5 @@
 import type { Message } from 'ai';
-import React, { type RefCallback, useState } from 'react';
-import { toast } from 'react-toastify';
+import React, { type RefCallback, useCallback } from 'react';
 import { ClientOnly } from 'remix-utils/client-only';
 import { Menu } from '~/components/sidebar/Menu.client';
 import { IconButton } from '~/components/ui/IconButton';
@@ -8,8 +7,7 @@ import { Workbench } from '~/components/workbench/Workbench.client';
 import { classNames } from '~/utils/classNames';
 import { Messages } from './Messages.client';
 import { SendButton } from './SendButton.client';
-import { importLocalDirectory } from '~/lib/importDirectory';
-import { webcontainer } from '~/lib/webcontainer';
+import { toast } from 'react-toastify';
 
 import styles from './BaseChat.module.scss';
 
@@ -63,30 +61,152 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     const [importingProject, setImportingProject] = useState(false);
     const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
 
-    const openLocalDirectory = async () => {
-      if (!window.showDirectoryPicker) {
-        toast.error('Your browser does not support the File System Access API');
-        return;
-      }
+    const handleImportProject = useCallback(() => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.setAttribute('webkitdirectory', '');
+      input.setAttribute('directory', '');
 
-      setImportingProject(true);
-      try {
-        // Transition to chat started state before importing project
-        if (!chatStarted && sendMessage) {
-          sendMessage({} as React.UIEvent, "I'm importing a local project, please wait...");
+      input.onchange = (e) => {
+        const inputFiles = (e.target as HTMLInputElement).files;
+        if (!inputFiles || inputFiles.length === 0) return;
+
+        // Filter out unwanted files and directories
+        const filesToImport = Array.from(inputFiles).filter(file => {
+          const relativePath = file.webkitRelativePath;
+          
+          // Common directories/files to exclude
+          const excludePaths = [
+            'node_modules/',
+            '.git/',
+            '.github/',
+            '.next/',
+            '.nuxt/',
+            '.vscode/',
+            'dist/',
+            'build/',
+            '.cache/',
+            'coverage/',
+            'out/',
+            'public/assets/',
+            'vendor/',
+          ];
+          
+          // File extensions to exclude
+          const excludeExtensions = [
+            '.DS_Store',
+            '.env',
+            '.env.local',
+            '.env.development',
+            '.env.production',
+            '.log',
+            '.tmp',
+            '.temp',
+            '.map',
+            '.lock',
+            '.wasm',
+            '.jar',
+            '.zip',
+            '.tar',
+            '.gz',
+            '.rar',
+            '.7z',
+            '.mp4',
+            '.mp3',
+            '.mov',
+            '.avi',
+            '.mkv',
+            '.png',
+            '.jpg',
+            '.jpeg',
+            '.gif',
+            '.ico',
+            '.svg',
+            '.pdf',
+            '.ttf',
+            '.otf',
+            '.woff',
+            '.woff2',
+          ];
+          
+          // Check if the path contains any excluded directory
+          const containsExcludedDir = excludePaths.some(path => relativePath.includes(path));
+          
+          // Check if the file has an excluded extension
+          const hasExcludedExtension = excludeExtensions.some(ext => relativePath.endsWith(ext));
+          
+          // Check the file size (skip files larger than 1MB)
+          const isFileTooLarge = file.size > 1024 * 1024;
+          
+          return !containsExcludedDir && !hasExcludedExtension && !isFileTooLarge;
+        });
+
+        // Check if there are too many files
+        if (filesToImport.length === 0) {
+          toast.error('No importable files found. Common directories like node_modules, .git, and binary/media files are excluded.');
+          return;
         }
-        
-        // Now that UI is in chat mode, import the project
-        const container = await webcontainer;
-        await importLocalDirectory(container);
 
-        toast.success('Project imported and started successfully!');
-      } catch (error: any) {
-        toast.error(error.message || 'Failed to import project');
-      } finally {
-        setImportingProject(false);
-      }
-    };
+        const MAX_FILES = 100;
+        if (filesToImport.length > MAX_FILES) {
+          const confirmImport = window.confirm(
+            `You're attempting to import ${filesToImport.length} files. This could cause performance issues. Continue with import?`
+          );
+          
+          if (!confirmImport) {
+            toast.info('Import canceled');
+            return;
+          }
+        }
+
+        // Force chatStarted if not already started
+        if (!chatStarted) {
+          // Create a synthetic React UIEvent instead of using a raw Event
+          const syntheticEvent = {
+            currentTarget: document.createElement('button'),
+            preventDefault: () => {},
+            stopPropagation: () => {},
+            nativeEvent: new MouseEvent('click'),
+            target: document.createElement('button'),
+            bubbles: true,
+            cancelable: true,
+            defaultPrevented: false,
+            isDefaultPrevented: () => false,
+            isPropagationStopped: () => false,
+            isTrusted: true,
+            persist: () => {},
+            type: 'click',
+          } as unknown as React.UIEvent;
+
+          // Send a simple message to start the chat if it's not started yet
+          sendMessage?.(syntheticEvent, "I'm importing a project");
+          toast.info("Starting chat so project can be imported");
+          
+          // Give the chat a moment to initialize before importing
+          setTimeout(() => {
+            dispatchImportEvent(filesToImport, inputFiles.length);
+          }, 1000);
+        } else {
+          // Chat already started, dispatch event immediately
+          dispatchImportEvent(filesToImport, inputFiles.length);
+        }
+      };
+
+      // Helper function to dispatch the import event
+      const dispatchImportEvent = (filesToImport: File[], totalFiles: number) => {
+        // Create a custom event with the filtered file data
+        const importEvent = new CustomEvent('workbench:import-files', {
+          detail: filesToImport,
+        });
+
+        // Dispatch the event for the workbench store or other components to handle
+        window.dispatchEvent(importEvent);
+
+        toast.info(`Project imported with ${filesToImport.length} files (${totalFiles - filesToImport.length} files excluded)`);
+      };
+
+      input.click();
+    }, [chatStarted, sendMessage]);
 
     return (
       <div
@@ -254,6 +374,16 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
             )}
           </div>
           <ClientOnly>{() => <Workbench chatStarted={chatStarted} isStreaming={isStreaming} />}</ClientOnly>
+        </div>
+        {/* Import Project Button */}
+        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50">
+          <div
+            onClick={handleImportProject}
+            className="flex items-center gap-2 bg-bolt-accent text-white px-5 py-3 rounded-lg shadow-lg hover:bg-bolt-accent-dark transition-colors cursor-pointer font-medium"
+          >
+            <div className="i-ph:folder-open text-xl" />
+            Import Local Project
+          </div>
         </div>
       </div>
     );
