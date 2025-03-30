@@ -102,6 +102,7 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
 
         const processFiles = async () => {
           const processedFiles: Record<string, any> = {};
+          let hasPackageJson = false;
 
           for (const file of importedFiles) {
             try {
@@ -112,16 +113,49 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
               });
 
               const filePath = `/home/project/${file.webkitRelativePath}`;
+              
+              // Check if this is package.json in the root directory
+              if (filePath === '/home/project/package.json' || 
+                  filePath === '/home/project/project/package.json') {
+                hasPackageJson = true;
+              }
 
               processedFiles[filePath] = {
                 content,
                 path: filePath,
                 name: file.name,
-                type: 'file', // Explicitly set the type to 'file'
+                type: 'file',
               };
             } catch (error) {
               console.error(`Error processing file ${file.name}:`, error);
             }
+          }
+
+          // If no package.json was found, create a basic one
+          if (!hasPackageJson) {
+            const basicPackageJson = {
+              name: "imported-project",
+              version: "1.0.0",
+              description: "Imported project",
+              main: "index.js",
+              scripts: {
+                "test": "echo \"Error: no test specified\" && exit 1",
+                "start": "node index.js"
+              },
+              keywords: [],
+              author: "",
+              license: "ISC"
+            };
+            
+            // Add package.json to the processedFiles
+            processedFiles['/home/project/package.json'] = {
+              content: JSON.stringify(basicPackageJson, null, 2),
+              path: '/home/project/package.json',
+              name: 'package.json',
+              type: 'file'
+            };
+            
+            console.log("Created default package.json file");
           }
 
           if (Object.keys(processedFiles).length > 0) {
@@ -175,7 +209,7 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
     return () => {
       window.removeEventListener('workbench:import-files', handleImportedFiles);
     };
-  }, [chatStarted]); // Add chatStarted as a dependency
+  }, [chatStarted]);
 
   const onEditorChange = useCallback<OnEditorChange>((update) => {
     workbenchStore.setCurrentDocumentContent(update.content);
