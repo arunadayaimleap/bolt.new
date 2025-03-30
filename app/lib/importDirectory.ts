@@ -47,8 +47,8 @@ export async function importLocalDirectory(webcontainer: WebContainer) {
     try {
       const gitignoreHandle = await findFile(directoryHandle, '.gitignore');
       if (gitignoreHandle) {
-        const gitignoreFile = await gitignoreHandle.getFile();
-        const gitignoreContent = await gitignoreFile.text();
+        // Fix here: No need to call getFile() as findFile() already returns a File
+        const gitignoreContent = await gitignoreHandle.text();
         const gitignorePatterns = parseGitignore(gitignoreContent);
         ignorePatterns.push(...gitignorePatterns);
         logger.debug('.gitignore found and parsed. Added patterns:', gitignorePatterns);
