@@ -1,5 +1,6 @@
 import type { Message } from 'ai';
-import React, { type RefCallback } from 'react';
+import React, { type RefCallback, useState } from 'react';
+import { toast } from 'react-toastify';
 import { ClientOnly } from 'remix-utils/client-only';
 import { Menu } from '~/components/sidebar/Menu.client';
 import { IconButton } from '~/components/ui/IconButton';
@@ -7,6 +8,8 @@ import { Workbench } from '~/components/workbench/Workbench.client';
 import { classNames } from '~/utils/classNames';
 import { Messages } from './Messages.client';
 import { SendButton } from './SendButton.client';
+import { importLocalDirectory } from '~/lib/importDirectory';
+import { webcontainer } from '~/lib/webcontainer';
 
 import styles from './BaseChat.module.scss';
 
@@ -57,7 +60,28 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     },
     ref,
   ) => {
+    const [importingProject, setImportingProject] = useState(false);
     const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
+
+    const openLocalDirectory = async () => {
+      if (!window.showDirectoryPicker) {
+        toast.error('Your browser does not support the File System Access API');
+        return;
+      }
+
+      setImportingProject(true);
+      try {
+        const container = await webcontainer;
+        await importLocalDirectory(container);
+
+        // After successful import, start the chat
+        toast.success('Project imported and started successfully!');
+      } catch (error: any) {
+        toast.error(error.message || 'Failed to import project');
+      } finally {
+        setImportingProject(false);
+      }
+    };
 
     return (
       <div
@@ -186,6 +210,25 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
             </div>
             {!chatStarted && (
               <div id="examples" className="relative w-full max-w-xl mx-auto mt-8 flex justify-center">
+                <div className="absolute -top-12 w-full">
+                  <button
+                    onClick={openLocalDirectory}
+                    disabled={importingProject}
+                    className="w-full mb-6 py-3 px-4 flex items-center justify-center gap-2 bg-bolt-elements-cta-background text-bolt-elements-textPrimary hover:brightness-95 rounded-lg font-medium transition-all"
+                  >
+                    {importingProject ? (
+                      <>
+                        <div className="i-svg-spinners:90-ring-with-bg text-xl" />
+                        Importing Project...
+                      </>
+                    ) : (
+                      <>
+                        <div className="i-ph:folder-open-duotone text-xl" />
+                        Open Local Project
+                      </>
+                    )}
+                  </button>
+                </div>
                 <div className="flex flex-col space-y-2 [mask-image:linear-gradient(to_bottom,black_0%,transparent_180%)] hover:[mask-image:none]">
                   {EXAMPLE_PROMPTS.map((examplePrompt, index) => {
                     return (
