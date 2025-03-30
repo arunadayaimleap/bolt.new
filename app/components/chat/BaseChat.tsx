@@ -67,11 +67,11 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       input.setAttribute('directory', '');
 
       input.onchange = (e) => {
-        const files = (e.target as HTMLInputElement).files;
-        if (!files || files.length === 0) return;
+        const inputFiles = (e.target as HTMLInputElement).files;
+        if (!inputFiles || inputFiles.length === 0) return;
 
         // Filter out unwanted files and directories
-        const filesToImport = Array.from(files).filter(file => {
+        const filesToImport = Array.from(inputFiles).filter(file => {
           const relativePath = file.webkitRelativePath;
           
           // Common directories/files to exclude
@@ -158,6 +158,41 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
           }
         }
 
+        // Force chatStarted if not already started
+        if (!chatStarted) {
+          // Create a synthetic React UIEvent instead of using a raw Event
+          const syntheticEvent = {
+            currentTarget: document.createElement('button'),
+            preventDefault: () => {},
+            stopPropagation: () => {},
+            nativeEvent: new MouseEvent('click'),
+            target: document.createElement('button'),
+            bubbles: true,
+            cancelable: true,
+            defaultPrevented: false,
+            isDefaultPrevented: () => false,
+            isPropagationStopped: () => false,
+            isTrusted: true,
+            persist: () => {},
+            type: 'click',
+          } as unknown as React.UIEvent;
+
+          // Send a simple message to start the chat if it's not started yet
+          sendMessage?.(syntheticEvent, "I'm importing a project");
+          toast.info("Starting chat so project can be imported");
+          
+          // Give the chat a moment to initialize before importing
+          setTimeout(() => {
+            dispatchImportEvent(filesToImport, inputFiles.length);
+          }, 1000);
+        } else {
+          // Chat already started, dispatch event immediately
+          dispatchImportEvent(filesToImport, inputFiles.length);
+        }
+      };
+
+      // Helper function to dispatch the import event
+      const dispatchImportEvent = (filesToImport: File[], totalFiles: number) => {
         // Create a custom event with the filtered file data
         const importEvent = new CustomEvent('workbench:import-files', {
           detail: filesToImport,
@@ -166,11 +201,11 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         // Dispatch the event for the workbench store or other components to handle
         window.dispatchEvent(importEvent);
 
-        toast.info(`Project imported with ${filesToImport.length} files (${files.length - filesToImport.length} files excluded)`);
+        toast.info(`Project imported with ${filesToImport.length} files (${totalFiles - filesToImport.length} files excluded)`);
       };
 
       input.click();
-    }, []);
+    }, [chatStarted, sendMessage]);
 
     return (
       <div

@@ -81,6 +81,102 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
     console.log('Workbench visibility:', showWorkbench);
   }, [showWorkbench]);
 
+  useEffect(() => {
+    const handleImportedFiles = (event: Event) => {
+      const customEvent = event as CustomEvent<File[]>;
+      const importedFiles = customEvent.detail;
+
+      if (importedFiles && importedFiles.length > 0) {
+        console.log(`Processing ${importedFiles.length} imported files`);
+        
+        // First ensure the chat is considered "started" for the workbench to be visible
+        if (!chatStarted) {
+          console.warn("Chat must be started before importing files");
+          toast.error("Please start a chat before importing files");
+          return;
+        }
+
+        // Explicitly force the workbench to be visible regardless of current state
+        workbenchStore.showWorkbench.set(true);
+        console.log("Workbench visibility explicitly set to TRUE");
+
+        const processFiles = async () => {
+          const processedFiles: Record<string, any> = {};
+
+          for (const file of importedFiles) {
+            try {
+              const content = await new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target?.result as string);
+                reader.readAsText(file);
+              });
+
+              const filePath = `/home/project/${file.webkitRelativePath}`;
+
+              processedFiles[filePath] = {
+                content,
+                path: filePath,
+                name: file.name,
+                type: 'file', // Explicitly set the type to 'file'
+              };
+            } catch (error) {
+              console.error(`Error processing file ${file.name}:`, error);
+            }
+          }
+
+          if (Object.keys(processedFiles).length > 0) {
+            try {
+              // Get current files from the store
+              const currentFiles = workbenchStore.files.get();
+              console.log("Current files in store:", Object.keys(currentFiles).length);
+              
+              // Create updated files object
+              const updatedFiles = { ...currentFiles, ...processedFiles };
+              console.log("Updated files to store:", Object.keys(updatedFiles).length);
+              
+              // Update the store with new files
+              workbenchStore.files.set(updatedFiles);
+              
+              // Select the first file
+              const firstFilePath = Object.keys(processedFiles)[0];
+              if (firstFilePath) {
+                workbenchStore.setSelectedFile(firstFilePath);
+                console.log("Selected file:", firstFilePath);
+              }
+              
+              // Switch to code view
+              workbenchStore.currentView.set('code');
+              
+              // Give time for the files to load then ensure workbench is visible again
+              setTimeout(() => {
+                if (!workbenchStore.showWorkbench.get()) {
+                  console.log("Re-setting workbench visibility after timeout");
+                  workbenchStore.showWorkbench.set(true);
+                }
+              }, 500);
+              
+              toast.success(`Successfully loaded ${Object.keys(processedFiles).length} files into the workbench`);
+            } catch (error) {
+              console.error("Error updating workbench files:", error);
+              toast.error("Error loading files into workbench");
+            }
+          }
+        };
+
+        processFiles().catch((error) => {
+          console.error('Error processing imported files:', error);
+          toast.error('Failed to process imported files');
+        });
+      }
+    };
+
+    window.addEventListener('workbench:import-files', handleImportedFiles);
+
+    return () => {
+      window.removeEventListener('workbench:import-files', handleImportedFiles);
+    };
+  }, [chatStarted]); // Add chatStarted as a dependency
+
   const onEditorChange = useCallback<OnEditorChange>((update) => {
     workbenchStore.setCurrentDocumentContent(update.content);
   }, []);
