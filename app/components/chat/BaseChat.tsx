@@ -71,10 +71,15 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
 
       setImportingProject(true);
       try {
+        // Transition to chat started state before importing project
+        if (!chatStarted && sendMessage) {
+          sendMessage({} as React.UIEvent, "I'm importing a local project, please wait...");
+        }
+        
+        // Now that UI is in chat mode, import the project
         const container = await webcontainer;
         await importLocalDirectory(container);
 
-        // After successful import, start the chat
         toast.success('Project imported and started successfully!');
       } catch (error: any) {
         toast.error(error.message || 'Failed to import project');
