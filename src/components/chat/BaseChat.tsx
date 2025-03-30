@@ -3,7 +3,7 @@ import { runChatAnimation } from './Chat.client';
 import { chatStore } from '~/lib/stores/chat';
 import { toast } from 'react-toastify';
 import { webcontainer } from '~/lib/webcontainer';
-import { importLocalDirectory } from '~/lib/localImport';
+import { importLocalDirectory } from '../../lib/localImport';
 
 // Define EXAMPLE_PROMPTS 
 const EXAMPLE_PROMPTS = [
