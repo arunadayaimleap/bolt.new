@@ -233,6 +233,14 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
     workbenchStore.resetCurrentDocument();
   }, []);
 
+  const saveAllFiles = useCallback(() => {
+    workbenchStore.saveAllFiles().then(() => {
+      toast.success('All files saved successfully');
+    }).catch(() => {
+      toast.error('Failed to save some files');
+    });
+  }, []);
+
   return (
     chatStarted && (
       <>
@@ -256,6 +264,17 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                 <div className="flex items-center px-3 py-2 border-b border-bolt-elements-borderColor">
                   <Slider selected={selectedView} options={sliderOptions} setSelected={setSelectedView} />
                   <div className="ml-auto" />
+                  
+                  {/* Save All Files Button */}
+                  <PanelHeaderButton
+                    className="mr-1 text-sm"
+                    onClick={saveAllFiles}
+                    title="Save all files"
+                  >
+                    <div className="i-ph:floppy-disk" />
+                    Save All
+                  </PanelHeaderButton>
+                  
                   {selectedView === 'code' && (
                     <PanelHeaderButton
                       className="mr-1 text-sm"
@@ -276,6 +295,14 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                     }}
                   />
                 </div>
+                
+                {/* Unsaved Files Indicator */}
+                {unsavedFiles.size > 0 && (
+                  <div className="bg-bolt-elements-background-depth-3 py-1 px-3 text-xs text-bolt-elements-textSecondary border-b border-bolt-elements-borderColor">
+                    <span className="font-medium text-bolt-accent">{unsavedFiles.size}</span> unsaved {unsavedFiles.size === 1 ? 'file' : 'files'} - click Save All to save changes
+                  </div>
+                )}
+
                 <div className="relative flex-1 overflow-hidden">
                   <View
                     initial={{ x: selectedView === 'code' ? 0 : '-100%' }}
