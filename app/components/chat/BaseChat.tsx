@@ -228,6 +228,72 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       input.click();
     }, [chatStarted, sendMessage]);
 
+    // Check on mount if we have a previous project to restore
+    React.useEffect(() => {
+      try {
+        // Check if we've already shown the restore prompt in this session
+        const hasPromptedRestore = sessionStorage.getItem('hasPromptedProjectRestore') === 'true';
+        
+        // Only show the restore prompt if we haven't already shown it in this session
+        if (!hasPromptedRestore && !chatStarted) {
+          // Check if there's a stored project from a previous session
+          const storedMeta = localStorage.getItem('importedProjectMeta');
+          
+          if (storedMeta) {
+            const meta = JSON.parse(storedMeta);
+            
+            // If it's a recent import (less than 1 hour old), offer to restore
+            const isRecent = Date.now() - meta.timestamp < 3600000; // 1 hour
+            
+            if (isRecent && meta.hasProcessedFiles) {
+              // Mark that we've shown the restore prompt in this session
+              sessionStorage.setItem('hasPromptedProjectRestore', 'true');
+              
+              const restoreProject = window.confirm(
+                `Would you like to restore your previously imported project (${meta.fileCount} files)?`
+              );
+              
+              if (restoreProject) {
+                // Set the import mode flag
+                (window as any).__PROJECT_IMPORT_MODE__ = true;
+                sessionStorage.setItem('currentMode', 'project-import');
+                
+                // Create a synthetic event to start the chat with a minimal prompt
+                const syntheticEvent = {
+                  currentTarget: document.createElement('button'),
+                  preventDefault: () => {},
+                  stopPropagation: () => {},
+                  nativeEvent: new MouseEvent('click'),
+                  target: document.createElement('button'),
+                  bubbles: true,
+                  cancelable: true,
+                  defaultPrevented: false,
+                  isDefaultPrevented: () => false,
+                  isPropagationStopped: () => false,
+                  isTrusted: true,
+                  persist: () => {},
+                  type: 'click',
+                } as unknown as React.UIEvent;
+                
+                // Start the chat
+                sendMessage?.(syntheticEvent, "I'm continuing to work on my imported project");
+              } else {
+                // They declined to restore, clear the project metadata to avoid future prompts
+                localStorage.removeItem('importedProjectMeta');
+              }
+            } else if (!isRecent) {
+              // Project is old, remove it
+              localStorage.removeItem('importedProjectMeta');
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Error checking for stored project:", e);
+        // Ensure we don't keep trying if there's an error
+        sessionStorage.setItem('hasPromptedProjectRestore', 'true');
+      }
+    }, [chatStarted, sendMessage]);
+
     return (
       <div
         ref={ref}
