@@ -115,14 +115,50 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
           let packageJsonContent = null;
           let packageJsonPath = '';
           
-          // Use a platform-agnostic path for the project root
-          const projectRoot = 'project';
+          // WebContainer operates with Unix-style paths
+          // The root directory must be an absolute path like /home/project
+          const projectRoot = '/home/project';
+          
+          // Create necessary directories structure to avoid ENOENT errors
+          const directories = new Set<string>();
+          
+          // First pass: collect all directories that need to be created
+          for (const file of importedFiles) {
+            const relativePath = file.webkitRelativePath;
+            const parts = relativePath.split('/');
+            
+            // Skip the first part (folder name) and the last part (file name)
+            if (parts.length > 1) {
+              let currentPath = projectRoot;
+              // Build each directory level and add to the set
+              for (let i = 0; i < parts.length - 1; i++) {
+                currentPath += '/' + parts[i];
+                directories.add(currentPath);
+              }
+            }
+          }
+          
+          console.log(`Need to create ${directories.size} directories`);
+          
+          // Create directories in ascending order of path depth to avoid parent dir not exist errors
+          const sortedDirs = Array.from(directories).sort((a, b) => {
+            return a.split('/').length - b.split('/').length;
+          });
+          
+          // Store directory creation promises in the processedFiles
+          for (const dir of sortedDirs) {
+            processedFiles[dir] = {
+              content: '',
+              path: dir,
+              name: dir.split('/').pop() || '',
+              type: 'directory',
+            };
+          }
           
           // First pass: determine project structure and check for package.json
           for (const file of importedFiles) {
-            // Use a normalized path format that works across platforms
-            const relativePath = file.webkitRelativePath.split('/').join('\\');
-            const filePath = `${projectRoot}\\${relativePath}`;
+            const relativePath = file.webkitRelativePath;
+            const filePath = `${projectRoot}/${relativePath}`;
             
             if (file.name === 'package.json') {
               hasPackageJson = true;
@@ -140,9 +176,10 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                 reader.readAsText(file);
               });
 
-              // Use a normalized path format
-              const relativePath = file.webkitRelativePath.split('/').join('\\');
-              const filePath = `${projectRoot}\\${relativePath}`;
+              const relativePath = file.webkitRelativePath;
+              const filePath = `${projectRoot}/${relativePath}`;
+              
+              console.log(`Processing file: ${filePath}`);
               
               // Store package.json content for analysis
               if (filePath === packageJsonPath) {
@@ -165,9 +202,9 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
             }
           }
 
-          // If no package.json was found, create one directly in the project root
+          // Default package.json creation if needed
           if (!hasPackageJson) {
-            const packageJsonPath = `${projectRoot}\\package.json`;
+            const packageJsonPath = `${projectRoot}/package.json`;
             const basicPackageJson = {
               name: "imported-project",
               version: "1.0.0",
@@ -194,8 +231,8 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
           }
           
           // Also create an index.js if none exists
-          if (!Object.keys(processedFiles).some(path => path.endsWith('index.js'))) {
-            const indexJsPath = `${projectRoot}\\index.js`;
+          if (!Object.keys(processedFiles).some(path => path.endsWith('/index.js'))) {
+            const indexJsPath = `${projectRoot}/index.js`;
             processedFiles[indexJsPath] = {
               content: 'console.log("Hello from imported project!");\n',
               path: indexJsPath,
@@ -205,50 +242,61 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
             console.log(`Created default index.js at ${indexJsPath}`);
           }
 
+          // Now update files in workbench
           if (Object.keys(processedFiles).length > 0) {
             try {
+              console.log("Files and directories to create:", Object.keys(processedFiles).map(path => {
+                const type = processedFiles[path].type;
+                return `${path} (${type})`;
+              }));
+              
               // Get current files from the store
               const currentFiles = workbenchStore.files.get();
-              console.log("Current files in store:", Object.keys(currentFiles).length);
               
-              // Create updated files object
-              const updatedFiles = { ...currentFiles, ...processedFiles };
-              console.log("Updated files to store:", Object.keys(updatedFiles).length);
+              // Create updated files object - using file path as key
+              const updatedFiles = { ...currentFiles };
+              
+              // First add directories
+              Object.values(processedFiles)
+                .filter(item => item.type === 'directory')
+                .forEach(dir => {
+                  updatedFiles[dir.path] = dir;
+                });
+              
+              // Then add files
+              Object.values(processedFiles)
+                .filter(item => item.type === 'file')
+                .forEach(file => {
+                  updatedFiles[file.path] = file;
+                });
               
               // Update the store with new files
               workbenchStore.files.set(updatedFiles);
               
+              // Log all files for debugging
+              console.log("All paths after update:", Object.keys(updatedFiles));
+              
               // Select package.json first if it exists
-              const packageJsonPath = `${projectRoot}\\package.json`;
-              if (processedFiles[packageJsonPath]) {
+              if (packageJsonPath && processedFiles[packageJsonPath]) {
+                console.log(`Selecting file: ${packageJsonPath}`);
                 workbenchStore.setSelectedFile(packageJsonPath);
-                console.log("Selected file: package.json");
               } else {
                 // Otherwise select the first file
-                const firstFilePath = Object.keys(processedFiles)[0];
-                if (firstFilePath) {
+                const filesOnly = Object.values(processedFiles).filter(f => f.type === 'file');
+                if (filesOnly.length > 0) {
+                  const firstFilePath = filesOnly[0].path;
+                  console.log(`Selecting first file: ${firstFilePath}`);
                   workbenchStore.setSelectedFile(firstFilePath);
-                  console.log("Selected file:", firstFilePath);
                 }
               }
               
-              // Switch to code view
-              workbenchStore.currentView.set('code');
-              
-              // Open terminal and run setup commands
+              // Terminal commands
               setTimeout(() => {
                 if (!workbenchStore.showTerminal.get()) {
                   workbenchStore.toggleTerminal(true);
                   console.log("Opened terminal");
                 }
                 
-                // When determining project directory path for terminal commands, use appropriate format
-                // Note: For terminal commands, we still use forward slashes as they work in both Linux and Windows terminals
-                const projectDir = packageJsonPath ? 
-                  packageJsonPath.substring(0, packageJsonPath.lastIndexOf('\\')).replace(/\\/g, '/') : 
-                  'project';
-                
-                // Determine which script to run based on package.json
                 let runScript = 'start';
                 if (packageJsonContent && packageJsonContent.scripts) {
                   if (packageJsonContent.scripts.dev) {
@@ -260,33 +308,30 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                   }
                 }
                 
-                // Run initialization commands in the terminal
+                const terminalProjectDir = packageJsonPath ? 
+                  packageJsonPath.substring(0, packageJsonPath.lastIndexOf('/')) : 
+                  projectRoot;
+                
                 const runCommands = () => {
                   try {
-                    // Get terminal instance through workbench
                     const terminal = (window as any).terminal || 
                                     (workbenchStore as any).terminal || 
                                     document.querySelector('.xterm-helper-textarea');
                     
                     if (terminal) {
-                      // Option 1: If terminal has a write method, use it
                       if (typeof terminal.write === 'function') {
-                        terminal.write(`cd ${projectDir}\n`);
+                        terminal.write(`cd ${terminalProjectDir}\n`);
                         terminal.write(`npm install\n`);
                         terminal.write(`npm run ${runScript}\n`);
-                      } 
-                      // Option 2: If terminal has a sendText method, use it
-                      else if (typeof terminal.sendText === 'function') {
-                        terminal.sendText(`cd ${projectDir}`);
+                      } else if (typeof terminal.sendText === 'function') {
+                        terminal.sendText(`cd ${terminalProjectDir}`);
                         terminal.sendText(`npm install`);
                         terminal.sendText(`npm run ${runScript}`);
-                      }
-                      // Option 3: Dispatch custom event for terminal commands
-                      else {
+                      } else {
                         window.dispatchEvent(new CustomEvent('terminal:execute', {
                           detail: {
                             commands: [
-                              `cd ${projectDir}`,
+                              `cd ${terminalProjectDir}`,
                               `npm install`,
                               `npm run ${runScript}`
                             ]
@@ -294,7 +339,7 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                         }));
                       }
                       
-                      console.log(`Running npm install and npm run ${runScript} in ${projectDir}`);
+                      console.log(`Running npm install and npm run ${runScript} in ${terminalProjectDir}`);
                     } else {
                       console.log("Terminal not found to run commands");
                     }
@@ -303,7 +348,6 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                   }
                 };
                 
-                // Try to run commands after a delay
                 setTimeout(runCommands, 1000);
               }, 1000);
               
