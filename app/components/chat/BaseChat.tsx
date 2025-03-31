@@ -181,7 +181,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
             sendMessage?.(syntheticEvent, "Analyze the package.json file and tell me how to install and run this project");
             
             // Skip waiting for a response, immediately dispatch the import event
-            dispatchImportEvent(filesToImport, inputFiles.length);
+            dispatchImportEvent(filesToImport);
             
             // Set project import flags 
             (window as any).__PROJECT_IMPORT_MODE__ = true;
@@ -191,15 +191,15 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
             console.error("Error in silent import:", err);
             
             // Even if there's an error in chat initialization, still try to import
-            dispatchImportEvent(filesToImport, inputFiles.length);
+            dispatchImportEvent(filesToImport);
           }
         } else {
-          dispatchImportEvent(filesToImport, inputFiles.length);
+          dispatchImportEvent(filesToImport);
         }
       };
 
       // Helper function to dispatch the import event
-      const dispatchImportEvent = (filesToImport: File[], totalCount: number) => {
+      const dispatchImportEvent = (filesToImport: File[]) => {
         // Create a custom event with the filtered file data
         const importEvent = new CustomEvent('workbench:import-files', {
           detail: filesToImport,
@@ -234,31 +234,30 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         // Check if we've already shown the restore prompt in this session
         const hasPromptedRestore = sessionStorage.getItem('hasPromptedProjectRestore') === 'true';
         
-        // Only show the restore prompt if we haven't already shown it in this session
+        // Only show the restore prompt if we haven't shown it yet and chat isn't started
         if (!hasPromptedRestore && !chatStarted) {
-          // Check if there's a stored project from a previous session
           const storedMeta = localStorage.getItem('importedProjectMeta');
           
           if (storedMeta) {
             const meta = JSON.parse(storedMeta);
             
-            // If it's a recent import (less than 1 hour old), offer to restore
+            // Only offer to restore if it's recent and has been processed
             const isRecent = Date.now() - meta.timestamp < 3600000; // 1 hour
             
             if (isRecent && meta.hasProcessedFiles) {
-              // Mark that we've shown the restore prompt in this session
+              // Mark that we've shown the restore prompt 
               sessionStorage.setItem('hasPromptedProjectRestore', 'true');
               
               const restoreProject = window.confirm(
-                `Would you like to restore your previously imported project (${meta.fileCount} files)?`
+                `Would you like to restore your previously imported project (${meta.fileCount || 'unknown'} files)?`
               );
               
               if (restoreProject) {
-                // Set the import mode flag
+                // Set import mode flags
                 (window as any).__PROJECT_IMPORT_MODE__ = true;
                 sessionStorage.setItem('currentMode', 'project-import');
                 
-                // Create a synthetic event to start the chat with a minimal prompt
+                // Create synthetic event for chat
                 const syntheticEvent = {
                   currentTarget: document.createElement('button'),
                   preventDefault: () => {},
@@ -275,24 +274,65 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   type: 'click',
                 } as unknown as React.UIEvent;
                 
-                // Start the chat
-                sendMessage?.(syntheticEvent, "I'm continuing to work on my imported project");
+                // Just make the workbench visible without trying to load any files
+                // Files should already be in the store from previous session
+                const workbenchStore = (window as any).workbenchStore;
+                if (workbenchStore && typeof workbenchStore.showWorkbench?.set === 'function') {
+                  workbenchStore.showWorkbench.set(true);
+                  console.log("Made workbench visible for project restoration");
+                }
+                
+                // Start the chat with a helpful message
+                sendMessage?.(syntheticEvent, "Project restored. How can I help you with it today?");
               } else {
-                // They declined to restore, clear the project metadata to avoid future prompts
+                // Remove the metadata to avoid future prompts
                 localStorage.removeItem('importedProjectMeta');
               }
             } else if (!isRecent) {
-              // Project is old, remove it
+              // Project is too old, remove it
               localStorage.removeItem('importedProjectMeta');
             }
           }
         }
       } catch (e) {
         console.error("Error checking for stored project:", e);
-        // Ensure we don't keep trying if there's an error
-        sessionStorage.setItem('hasPromptedProjectRestore', 'true');
+        sessionStorage.setItem('hasPromptedProjectRestore', 'true'); // Prevent retry
       }
     }, [chatStarted, sendMessage]);
+
+    // Add a function for manually restoring projects
+    const restoreProject = useCallback(() => {
+      try {
+        const meta = JSON.parse(localStorage.getItem('importedProjectMeta') || '{}');
+        
+        if (meta.projectRoot) {
+          toast.info(`Attempting to restore project from ${meta.projectRoot}`);
+          
+          // Set import mode flags
+          (window as any).__PROJECT_IMPORT_MODE__ = true;
+          sessionStorage.setItem('currentMode', 'project-import');
+          
+          // Show the workbench UI
+          const workbenchStore = (window as any).workbenchStore;
+          if (workbenchStore && typeof workbenchStore.showWorkbench?.set === 'function') {
+            workbenchStore.showWorkbench.set(true);
+          }
+          
+          // We don't need to reload files - they should persist in localStorage
+          // Just make the workbench visible
+        } else {
+          toast.error("No project information found to restore");
+        }
+      } catch (e) {
+        console.error("Error restoring project:", e);
+        toast.error("Failed to restore project");
+      }
+    }, []);
+
+    // Make the restore function available globally for terminal commands
+    if (typeof window !== 'undefined') {
+      (window as any).__restoreProject = restoreProject;
+    }
 
     return (
       <div

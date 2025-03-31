@@ -83,30 +83,31 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
   // Restore files from local storage on initial load
   useEffect(() => {
     try {
-      // Check if we have stored files from a previous session
       const storedFilesMeta = localStorage.getItem('importedProjectMeta');
       
       if (storedFilesMeta) {
         const meta = JSON.parse(storedFilesMeta);
         console.log("Found stored project metadata:", meta);
         
-        // Set project import mode flag
-        (window as any).__PROJECT_IMPORT_MODE__ = true;
-        
-        // If the files were already processed and we have project path
-        if (meta.projectRoot && meta.hasProcessedFiles) {
-          console.log(`Attempting to restore project from ${meta.projectRoot}`);
+        // Only attempt to restore if project has actually been processed
+        if (meta.hasProcessedFiles && meta.projectRoot) {
+          // Check if files already exist in the workbench
+          const currentFiles = workbenchStore.files.get();
+          const fileCount = Object.keys(currentFiles).length;
           
-          // This will ensure workbench appears even if chat isn't started
-          // Only needed when restoring from storage
-          workbenchStore.showWorkbench.set(true);
-          
-          // Just a visual indicator that restoration is happening
-          toast.info("Restoring project files...");
+          // Only show restoration UI if we don't already have files loaded
+          if (fileCount <= 1) { // Allow for possible /home/project directory
+            console.log(`Project appears to need restoration, showing UI`);
+            (window as any).__PROJECT_IMPORT_MODE__ = true;
+            workbenchStore.showWorkbench.set(true);
+            toast.info("Previous project detected. Use 'Restore Project' in the chat to reload it.");
+          } else {
+            console.log(`Project already has ${fileCount} files loaded, no restoration needed`);
+          }
         }
       }
     } catch (err) {
-      console.error("Error restoring project state:", err);
+      console.error("Error checking project state:", err);
     }
   }, []);
 
@@ -142,299 +143,249 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
         const processFiles = async () => {
           const processedFiles: Record<string, any> = {};
           let hasPackageJson = false;
-          let packageJsonContent = null;
+          let packageJsonContent: Record<string, any> | null = null;
           let packageJsonPath = '';
           
-          // WebContainer always uses Unix-style paths
           // Extract the project root folder name from the first file
           const firstFile = importedFiles[0];
           const projectFolderName = firstFile.webkitRelativePath.split('/')[0];
+          
+          // WebContainer ALWAYS uses Unix-style paths, so we'll stick with that format
           const projectRoot = `/home/project/${projectFolderName}`;
           
           console.log(`Using project root: ${projectRoot}`);
           
-          // Store metadata about this project for persistence across refreshes
           try {
+            // Store metadata about this project for persistence
             localStorage.setItem('importedProjectMeta', JSON.stringify({
               timestamp: Date.now(),
               projectRoot,
-              hasPackageJson: false, // Will update this later
-              hasProcessedFiles: false // Mark as not processed yet
+              hasPackageJson: false,
+              hasProcessedFiles: false
             }));
-          } catch (e) {
-            console.warn("Could not store project metadata:", e);
-          }
-          
-          // Create necessary directories structure to avoid ENOENT errors
-          const directories = new Set<string>();
-          
-          // Add project root directory but NOT the /home/project directly 
-          // (should be created by WebContainer already)
-          directories.add(projectRoot);
-          
-          // First pass: collect all directories that need to be created
-          for (const file of importedFiles) {
-            const relativePath = file.webkitRelativePath;
-            const pathParts = relativePath.split('/');
             
-            if (pathParts.length > 1) {
-              // Start with project root
-              let currentPath = `/home/project`;
-              
-              // Build each directory level and add to the set
-              for (let i = 0; i < pathParts.length - 1; i++) {
-                currentPath += '/' + pathParts[i];
-                directories.add(currentPath);
+            // Try to get a webcontainer instance
+            const webcontainerInstance = (window as any).webcontainerInstance;
+            
+            // Explicitly make the base project directory
+            try {
+              if (webcontainerInstance && webcontainerInstance.fs) {
+                await webcontainerInstance.fs.mkdir('/home/project', { recursive: true });
+                console.log("Ensured base project directory exists");
+              }
+            } catch (e) {
+              console.log("Base directory likely exists already:", e);
+            }
+            
+            // Process all files first, prepare data structures
+            const directories = new Set<string>();
+            const fileContents: Record<string, string> = {};
+            
+            // Collect all files and directories first
+            for (const file of importedFiles) {
+              try {
+                const content = await new Promise<string>((resolve) => {
+                  const reader = new FileReader();
+                  reader.onload = (e) => resolve(e.target?.result as string);
+                  reader.readAsText(file);
+                });
+                
+                const relativePath = file.webkitRelativePath;
+                const filePath = `/home/project/${relativePath}`;
+                
+                // Store file content for later processing
+                fileContents[filePath] = content;
+                
+                // Collect directories
+                const parts = filePath.split('/');
+                parts.pop(); // Remove the filename
+                
+                let dirPath = '';
+                for (let i = 1; i < parts.length; i++) {
+                  dirPath += '/' + parts[i];
+                  directories.add(dirPath);
+                }
+                
+                // Check for package.json
+                if (file.name === 'package.json') {
+                  hasPackageJson = true;
+                  packageJsonPath = filePath;
+                  
+                  try {
+                    packageJsonContent = JSON.parse(content);
+                    console.log("Parsed package.json:", packageJsonContent);
+                  } catch (e) {
+                    console.error("Error parsing package.json:", e);
+                  }
+                }
+              } catch (error) {
+                console.error(`Error reading file ${file.name}:`, error);
               }
             }
-          }
-          
-          console.log(`Need to create ${directories.size} directories`);
-          
-          // Create directories in ascending order of path depth to avoid parent dir not exist errors
-          const sortedDirs = Array.from(directories).sort((a, b) => {
-            return a.split('/').length - b.split('/').length;
-          });
-          
-          // Store directory creation promises in the processedFiles
-          for (const dir of sortedDirs) {
-            processedFiles[dir] = {
-              content: '',
-              path: dir,
-              name: dir.split('/').pop() || '',
-              type: 'directory',
-            };
-          }
-          
-          // Clean up old files - IMPORTANT: we need to remove any existing files at the root level
-          // Get current files from the store
-          const currentFiles = workbenchStore.files.get();
-          const updatedFiles: Record<string, any> = {};
-          
-          // Only keep files that are NOT in /home/project/ directly (remove root-level files)
-          Object.entries(currentFiles).forEach(([path, file]) => {
-            if (!path.match(/^\/home\/project\/[^\/]+$/)) {
-              updatedFiles[path] = file;
+            
+            // Update metadata after finding package.json
+            if (hasPackageJson) {
+              try {
+                const meta = JSON.parse(localStorage.getItem('importedProjectMeta') || '{}');
+                meta.hasPackageJson = true;
+                meta.packageJsonPath = packageJsonPath;
+                localStorage.setItem('importedProjectMeta', JSON.stringify(meta));
+              } catch (e) {
+                console.warn("Could not update project metadata:", e);
+              }
             }
-          });
-          
-          // Process files using original relative paths
-          for (const file of importedFiles) {
-            try {
-              const content = await new Promise<string>((resolve) => {
-                const reader = new FileReader();
-                reader.onload = (e) => resolve(e.target?.result as string);
-                reader.readAsText(file);
-              });
-
-              const relativePath = file.webkitRelativePath;
-              const filePath = `/home/project/${relativePath}`;
+            
+            // Create new processed files collection
+            const processedFiles: Record<string, any> = {};
+            
+            // Create all directories in order (important for the file system)
+            const sortedDirs = Array.from(directories).sort((a, b) => a.split('/').length - b.split('/').length);
+            
+            // Start with a clean slate - clear existing files
+            workbenchStore.files.set({});
+            
+            // Add all directories to processed files
+            for (const dir of sortedDirs) {
+              processedFiles[dir] = {
+                content: '',
+                path: dir,
+                name: dir.split('/').pop() || '',
+                type: 'directory',
+              };
               
-              console.log(`Processing file: ${filePath}`);
-              
-              if (file.name === 'package.json') {
-                hasPackageJson = true;
-                packageJsonPath = filePath;
+              // Create actual directories if webcontainer available
+              if (webcontainerInstance && webcontainerInstance.fs) {
                 try {
-                  packageJsonContent = JSON.parse(content);
-                  console.log("Parsed package.json:", packageJsonContent);
+                  await webcontainerInstance.fs.mkdir(dir, { recursive: true });
+                  console.log(`Created directory: ${dir}`);
                 } catch (e) {
-                  console.error("Error parsing package.json:", e);
+                  console.warn(`Error creating directory ${dir}:`, e);
                 }
               }
-
+            }
+            
+            // Now add all files 
+            for (const [filePath, content] of Object.entries(fileContents)) {
               processedFiles[filePath] = {
                 content,
                 path: filePath,
-                name: file.name,
+                name: filePath.split('/').pop() || '',
                 type: 'file',
               };
-            } catch (error) {
-              console.error(`Error processing file ${file.name}:`, error);
+              
+              // Actually write to filesystem if webcontainer available
+              if (webcontainerInstance && webcontainerInstance.fs) {
+                try {
+                  await webcontainerInstance.fs.writeFile(filePath, content);
+                  console.log(`Wrote file: ${filePath}`);
+                } catch (e) {
+                  console.error(`Error writing file ${filePath}:`, e);
+                }
+              }
             }
-          }
-
-          // Update project metadata with package.json info
-          if (hasPackageJson) {
+            
+            // Update the workbench with all files and directories
+            console.log(`Updating workbench with ${Object.keys(processedFiles).length} items`);
+            workbenchStore.files.set(processedFiles);
+            
+            // Mark as processed in metadata
             try {
               const meta = JSON.parse(localStorage.getItem('importedProjectMeta') || '{}');
-              meta.hasPackageJson = true;
-              meta.packageJsonPath = packageJsonPath;
+              meta.hasProcessedFiles = true;
+              meta.fileCount = Object.values(processedFiles).filter(item => item.type === 'file').length;
               localStorage.setItem('importedProjectMeta', JSON.stringify(meta));
             } catch (e) {
               console.warn("Could not update project metadata:", e);
             }
             
-            // Skip creating default files if we found a package.json
-            console.log("Using existing package.json, skipping default file creation");
-          } else {
-            // Only create default files if no package.json was found
-            const packageJsonPath = `${projectRoot}/package.json`;
-            const basicPackageJson = {
-              name: "imported-project",
-              version: "1.0.0",
-              description: "Imported project",
-              main: "index.js",
-              scripts: {
-                "test": "echo \"Error: no test specified\" && exit 1",
-                "start": "node index.js",
-                "dev": "node index.js"
-              },
-              keywords: [],
-              author: "",
-              license: "ISC"
-            };
-            
-            processedFiles[packageJsonPath] = {
-              content: JSON.stringify(basicPackageJson, null, 2),
-              path: packageJsonPath,
-              name: 'package.json',
-              type: 'file'
-            };
-            
-            console.log(`Created default package.json at ${packageJsonPath}`);
-            
-            // Also create an index.js if none exists
-            const indexJsPath = `${projectRoot}/index.js`;
-            processedFiles[indexJsPath] = {
-              content: 'console.log("Hello from imported project!");\n',
-              path: indexJsPath,
-              name: 'index.js',
-              type: 'file'
-            };
-            console.log(`Created default index.js at ${indexJsPath}`);
-          }
-
-          // Now update files in workbench
-          if (Object.keys(processedFiles).length > 0) {
-            try {
-              console.log("Files and directories to create:", Object.keys(processedFiles).map(path => {
-                const type = processedFiles[path].type;
-                return `${path} (${type})`;
-              }));
-              
-              // First add directories
-              Object.values(processedFiles)
-                .filter(item => item.type === 'directory')
-                .forEach(dir => {
-                  updatedFiles[dir.path] = dir;
+            // Select appropriate file
+            if (hasPackageJson && packageJsonPath) {
+              console.log(`Selecting file: ${packageJsonPath}`);
+              workbenchStore.setSelectedFile(packageJsonPath);
+            } else {
+              const filesOnly = Object.values(processedFiles)
+                .filter(f => f.type === 'file')
+                .sort((a, b) => {
+                  if (a.name.toLowerCase() === 'readme.md') return -1;
+                  if (b.name.toLowerCase() === 'readme.md') return 1;
+                  return a.path.localeCompare(b.path);
                 });
-              
-              // Then add files
-              Object.values(processedFiles)
-                .filter(item => item.type === 'file')
-                .forEach(file => {
-                  updatedFiles[file.path] = file;
-                });
-              
-              // Update the store with the cleaned and new files
-              console.log("Updating workbench with new files and cleaned old files");
-              workbenchStore.files.set(updatedFiles);
-              
-              // Mark as processed in metadata
-              try {
-                const meta = JSON.parse(localStorage.getItem('importedProjectMeta') || '{}');
-                meta.hasProcessedFiles = true;
-                meta.fileCount = Object.keys(processedFiles).length;
-                localStorage.setItem('importedProjectMeta', JSON.stringify(meta));
-              } catch (e) {
-                console.warn("Could not update project metadata:", e);
-              }
-              
-              // Log all files for debugging
-              console.log("All paths after update:", Object.keys(updatedFiles));
-              
-              // Select package.json first if it exists
-              if (packageJsonPath && processedFiles[packageJsonPath]) {
-                console.log(`Selecting file: ${packageJsonPath}`);
-                workbenchStore.setSelectedFile(packageJsonPath);
-              } else {
-                // Otherwise select a good starting file
-                const filesOnly = Object.values(processedFiles)
-                  .filter(f => f.type === 'file')
-                  .sort((a, b) => {
-                    // Prioritize README files, then package.json
-                    if (a.name.toLowerCase() === 'readme.md') return -1;
-                    if (b.name.toLowerCase() === 'readme.md') return 1;
-                    if (a.name === 'package.json') return -1;
-                    if (b.name === 'package.json') return 1;
-                    // Fallback to alphabetical
-                    return a.path.localeCompare(b.path);
-                  });
-                  
-                if (filesOnly.length > 0) {
-                  const firstFilePath = filesOnly[0].path;
-                  console.log(`Selecting first file: ${firstFilePath}`);
-                  workbenchStore.setSelectedFile(firstFilePath);
-                }
-              }
-              
-              // Terminal commands
-              setTimeout(() => {
-                if (!workbenchStore.showTerminal.get()) {
-                  workbenchStore.toggleTerminal(true);
-                  console.log("Opened terminal");
-                }
                 
-                let runScript = 'start';
-                if (packageJsonContent && packageJsonContent.scripts) {
-                  if (packageJsonContent.scripts.dev) {
+              if (filesOnly.length > 0) {
+                const firstFilePath = filesOnly[0].path;
+                console.log(`Selecting first file: ${firstFilePath}`);
+                workbenchStore.setSelectedFile(firstFilePath);
+              }
+            }
+            
+            // Terminal commands - unchanged
+            setTimeout(() => {
+              if (!workbenchStore.showTerminal.get()) {
+                workbenchStore.toggleTerminal(true);
+                console.log("Opened terminal");
+              }
+              
+              let runScript = 'start';
+              if (packageJsonContent && typeof packageJsonContent === 'object') {
+                const scripts = packageJsonContent.scripts;
+                if (scripts) {
+                  if (scripts.dev) {
                     runScript = 'dev';
-                  } else if (packageJsonContent.scripts.develop) {
+                  } else if (scripts.develop) {
                     runScript = 'develop';
-                  } else if (packageJsonContent.scripts.serve) {
+                  } else if (scripts.serve) {
                     runScript = 'serve';
                   }
                 }
-                
-                const terminalProjectDir = packageJsonPath ? 
-                  packageJsonPath.substring(0, packageJsonPath.lastIndexOf('/')) : 
-                  projectRoot;
-                
-                const runCommands = () => {
-                  try {
-                    const terminal = (window as any).terminal || 
-                                    (workbenchStore as any).terminal || 
-                                    document.querySelector('.xterm-helper-textarea');
-                    
-                    if (terminal) {
-                      if (typeof terminal.write === 'function') {
-                        terminal.write(`cd ${terminalProjectDir}\n`);
-                        terminal.write(`npm install\n`);
-                        terminal.write(`npm run ${runScript}\n`);
-                      } else if (typeof terminal.sendText === 'function') {
-                        terminal.sendText(`cd ${terminalProjectDir}`);
-                        terminal.sendText(`npm install`);
-                        terminal.sendText(`npm run ${runScript}`);
-                      } else {
-                        window.dispatchEvent(new CustomEvent('terminal:execute', {
-                          detail: {
-                            commands: [
-                              `cd ${terminalProjectDir}`,
-                              `npm install`,
-                              `npm run ${runScript}`
-                            ]
-                          }
-                        }));
-                      }
-                      
-                      console.log(`Running npm install and npm run ${runScript} in ${terminalProjectDir}`);
-                    } else {
-                      console.log("Terminal not found to run commands");
-                    }
-                  } catch (e) {
-                    console.error("Error running terminal commands:", e);
-                  }
-                };
-                
-                setTimeout(runCommands, 1000);
-              }, 1000);
+              }
               
-              toast.success(`Successfully loaded ${Object.keys(processedFiles).length} files into the workbench`);
-            } catch (error) {
-              console.error("Error updating workbench files:", error);
-              toast.error("Error loading files into workbench");
-            }
+              const terminalProjectDir = packageJsonPath ? 
+                packageJsonPath.substring(0, packageJsonPath.lastIndexOf('/')) : 
+                projectRoot;
+              
+              const runCommands = () => {
+                try {
+                  const terminal = (window as any).terminal || 
+                                  (workbenchStore as any).terminal || 
+                                  document.querySelector('.xterm-helper-textarea');
+                  
+                  if (terminal) {
+                    if (typeof terminal.write === 'function') {
+                      terminal.write(`cd ${terminalProjectDir}\n`);
+                      terminal.write(`npm install\n`);
+                      terminal.write(`npm run ${runScript}\n`);
+                    } else if (typeof terminal.sendText === 'function') {
+                      terminal.sendText(`cd ${terminalProjectDir}`);
+                      terminal.sendText(`npm install`);
+                      terminal.sendText(`npm run ${runScript}`);
+                    } else {
+                      window.dispatchEvent(new CustomEvent('terminal:execute', {
+                        detail: {
+                          commands: [
+                            `cd ${terminalProjectDir}`,
+                            `npm install`,
+                            `npm run ${runScript}`
+                          ]
+                        }
+                      }));
+                    }
+                    
+                    console.log(`Running npm install and npm run ${runScript} in ${terminalProjectDir}`);
+                  } else {
+                    console.log("Terminal not found to run commands");
+                  }
+                } catch (e) {
+                  console.error("Error running terminal commands:", e);
+                }
+              };
+              
+              setTimeout(runCommands, 1000);
+            }, 1000);
+            
+            toast.success(`Successfully loaded ${Object.keys(processedFiles).filter(k => processedFiles[k].type === 'file').length} files into the workbench`);
+          } catch (error) {
+            console.error("Error in file processing:", error);
+            toast.error("Error processing project files");
           }
         };
 
