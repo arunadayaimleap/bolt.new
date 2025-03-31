@@ -158,41 +158,48 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
           }
         }
 
-        // Force chatStarted if not already started
+        // For chat initialization, use a very specific technical command that's unlikely to trigger generation
         if (!chatStarted) {
-          // Create a synthetic React UIEvent instead of using a raw Event
-          const syntheticEvent = {
-            currentTarget: document.createElement('button'),
-            preventDefault: () => {},
-            stopPropagation: () => {},
-            nativeEvent: new MouseEvent('click'),
-            target: document.createElement('button'),
-            bubbles: true,
-            cancelable: true,
-            defaultPrevented: false,
-            isDefaultPrevented: () => false,
-            isPropagationStopped: () => false,
-            isTrusted: true,
-            persist: () => {},
-            type: 'click',
-          } as unknown as React.UIEvent;
-
-          // Send a simple message to start the chat if it's not started yet
-          sendMessage?.(syntheticEvent, "I'm importing a project");
-          toast.info("Starting chat so project can be imported");
-          
-          // Give the chat a moment to initialize before importing
-          setTimeout(() => {
+          try {
+            const syntheticEvent = {
+              currentTarget: document.createElement('button'),
+              preventDefault: () => {},
+              stopPropagation: () => {},
+              nativeEvent: new MouseEvent('click'),
+              target: document.createElement('button'),
+              bubbles: true,
+              cancelable: true,
+              defaultPrevented: false,
+              isDefaultPrevented: () => false,
+              isPropagationStopped: () => false,
+              isTrusted: true,
+              persist: () => {},
+              type: 'click',
+            } as unknown as React.UIEvent;
+            
+            // Use a specific prompt that makes the AI help with the imported project
+            sendMessage?.(syntheticEvent, "Analyze the package.json file and tell me how to install and run this project");
+            
+            // Skip waiting for a response, immediately dispatch the import event
             dispatchImportEvent(filesToImport, inputFiles.length);
-          }, 1000);
+            
+            // Set project import flags 
+            (window as any).__PROJECT_IMPORT_MODE__ = true;
+            sessionStorage.setItem('currentMode', 'project-import');
+            localStorage.setItem('skipAIResponses', 'true');
+          } catch (err) {
+            console.error("Error in silent import:", err);
+            
+            // Even if there's an error in chat initialization, still try to import
+            dispatchImportEvent(filesToImport, inputFiles.length);
+          }
         } else {
-          // Chat already started, dispatch event immediately
           dispatchImportEvent(filesToImport, inputFiles.length);
         }
       };
 
       // Helper function to dispatch the import event
-      const dispatchImportEvent = (filesToImport: File[], totalFiles: number) => {
+      const dispatchImportEvent = (filesToImport: File[], totalCount: number) => {
         // Create a custom event with the filtered file data
         const importEvent = new CustomEvent('workbench:import-files', {
           detail: filesToImport,
@@ -201,7 +208,21 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         // Dispatch the event for the workbench store or other components to handle
         window.dispatchEvent(importEvent);
 
-        toast.info(`Project imported with ${filesToImport.length} files (${totalFiles - filesToImport.length} files excluded)`);
+        // Don't wait for chat start to show success message
+        toast.success(`Project imported with ${filesToImport.length} files`);
+        
+        // Try to force the workbench to appear
+        setTimeout(() => {
+          try {
+            // Use type casting to avoid TypeScript errors
+            const ws = (window as any).workbenchStore;
+            if (ws && typeof ws.showWorkbench?.set === 'function') {
+              ws.showWorkbench.set(true);
+            }
+          } catch (e) {
+            console.error("Error accessing workbench store:", e);
+          }
+        }, 500);
       };
 
       input.click();

@@ -67,6 +67,19 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
     workbenchStore.currentView.set(view);
   };
 
+  const isProjectImport = useStore(
+    computed([workbenchStore.previews], 
+      function isImportMode() {
+        return Boolean(
+          (window as any).__PROJECT_IMPORT_MODE__ === true || 
+          sessionStorage.getItem('currentMode') === 'project-import'
+        );
+      }
+    )
+  );
+
+  const effectiveChatStarted = Boolean(chatStarted || isProjectImport);
+
   useEffect(() => {
     if (hasPreview) {
       setSelectedView('preview');
@@ -89,21 +102,36 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
       if (importedFiles && importedFiles.length > 0) {
         console.log(`Processing ${importedFiles.length} imported files`);
         
-        // First ensure the chat is considered "started" for the workbench to be visible
-        if (!chatStarted) {
-          console.warn("Chat must be started before importing files");
-          toast.error("Please start a chat before importing files");
-          return;
-        }
-
         // Explicitly force the workbench to be visible regardless of current state
         workbenchStore.showWorkbench.set(true);
         console.log("Workbench visibility explicitly set to TRUE");
 
+        // Set import mode flag
+        (window as any).__PROJECT_IMPORT_MODE__ = true;
+
         const processFiles = async () => {
           const processedFiles: Record<string, any> = {};
           let hasPackageJson = false;
-
+          let packageJsonContent = null;
+          let packageJsonPath = '';
+          
+          // Use a platform-agnostic path for the project root
+          const projectRoot = 'project';
+          
+          // First pass: determine project structure and check for package.json
+          for (const file of importedFiles) {
+            // Use a normalized path format that works across platforms
+            const relativePath = file.webkitRelativePath.split('/').join('\\');
+            const filePath = `${projectRoot}\\${relativePath}`;
+            
+            if (file.name === 'package.json') {
+              hasPackageJson = true;
+              packageJsonPath = filePath;
+              console.log(`Found package.json at ${filePath}`);
+            }
+          }
+          
+          // Second pass: process all files
           for (const file of importedFiles) {
             try {
               const content = await new Promise<string>((resolve) => {
@@ -112,12 +140,18 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                 reader.readAsText(file);
               });
 
-              const filePath = `/home/project/${file.webkitRelativePath}`;
+              // Use a normalized path format
+              const relativePath = file.webkitRelativePath.split('/').join('\\');
+              const filePath = `${projectRoot}\\${relativePath}`;
               
-              // Check if this is package.json in the root directory
-              if (filePath === '/home/project/package.json' || 
-                  filePath === '/home/project/project/package.json') {
-                hasPackageJson = true;
+              // Store package.json content for analysis
+              if (filePath === packageJsonPath) {
+                try {
+                  packageJsonContent = JSON.parse(content);
+                  console.log("Parsed package.json:", packageJsonContent);
+                } catch (e) {
+                  console.error("Error parsing package.json:", e);
+                }
               }
 
               processedFiles[filePath] = {
@@ -131,8 +165,9 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
             }
           }
 
-          // If no package.json was found, create a basic one
+          // If no package.json was found, create one directly in the project root
           if (!hasPackageJson) {
+            const packageJsonPath = `${projectRoot}\\package.json`;
             const basicPackageJson = {
               name: "imported-project",
               version: "1.0.0",
@@ -140,22 +175,34 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
               main: "index.js",
               scripts: {
                 "test": "echo \"Error: no test specified\" && exit 1",
-                "start": "node index.js"
+                "start": "node index.js",
+                "dev": "node index.js"
               },
               keywords: [],
               author: "",
               license: "ISC"
             };
             
-            // Add package.json to the processedFiles
-            processedFiles['/home/project/package.json'] = {
+            processedFiles[packageJsonPath] = {
               content: JSON.stringify(basicPackageJson, null, 2),
-              path: '/home/project/package.json',
+              path: packageJsonPath,
               name: 'package.json',
               type: 'file'
             };
             
-            console.log("Created default package.json file");
+            console.log(`Created default package.json at ${packageJsonPath}`);
+          }
+          
+          // Also create an index.js if none exists
+          if (!Object.keys(processedFiles).some(path => path.endsWith('index.js'))) {
+            const indexJsPath = `${projectRoot}\\index.js`;
+            processedFiles[indexJsPath] = {
+              content: 'console.log("Hello from imported project!");\n',
+              path: indexJsPath,
+              name: 'index.js',
+              type: 'file'
+            };
+            console.log(`Created default index.js at ${indexJsPath}`);
           }
 
           if (Object.keys(processedFiles).length > 0) {
@@ -171,23 +218,94 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
               // Update the store with new files
               workbenchStore.files.set(updatedFiles);
               
-              // Select the first file
-              const firstFilePath = Object.keys(processedFiles)[0];
-              if (firstFilePath) {
-                workbenchStore.setSelectedFile(firstFilePath);
-                console.log("Selected file:", firstFilePath);
+              // Select package.json first if it exists
+              const packageJsonPath = `${projectRoot}\\package.json`;
+              if (processedFiles[packageJsonPath]) {
+                workbenchStore.setSelectedFile(packageJsonPath);
+                console.log("Selected file: package.json");
+              } else {
+                // Otherwise select the first file
+                const firstFilePath = Object.keys(processedFiles)[0];
+                if (firstFilePath) {
+                  workbenchStore.setSelectedFile(firstFilePath);
+                  console.log("Selected file:", firstFilePath);
+                }
               }
               
               // Switch to code view
               workbenchStore.currentView.set('code');
               
-              // Give time for the files to load then ensure workbench is visible again
+              // Open terminal and run setup commands
               setTimeout(() => {
-                if (!workbenchStore.showWorkbench.get()) {
-                  console.log("Re-setting workbench visibility after timeout");
-                  workbenchStore.showWorkbench.set(true);
+                if (!workbenchStore.showTerminal.get()) {
+                  workbenchStore.toggleTerminal(true);
+                  console.log("Opened terminal");
                 }
-              }, 500);
+                
+                // When determining project directory path for terminal commands, use appropriate format
+                // Note: For terminal commands, we still use forward slashes as they work in both Linux and Windows terminals
+                const projectDir = packageJsonPath ? 
+                  packageJsonPath.substring(0, packageJsonPath.lastIndexOf('\\')).replace(/\\/g, '/') : 
+                  'project';
+                
+                // Determine which script to run based on package.json
+                let runScript = 'start';
+                if (packageJsonContent && packageJsonContent.scripts) {
+                  if (packageJsonContent.scripts.dev) {
+                    runScript = 'dev';
+                  } else if (packageJsonContent.scripts.develop) {
+                    runScript = 'develop';
+                  } else if (packageJsonContent.scripts.serve) {
+                    runScript = 'serve';
+                  }
+                }
+                
+                // Run initialization commands in the terminal
+                const runCommands = () => {
+                  try {
+                    // Get terminal instance through workbench
+                    const terminal = (window as any).terminal || 
+                                    (workbenchStore as any).terminal || 
+                                    document.querySelector('.xterm-helper-textarea');
+                    
+                    if (terminal) {
+                      // Option 1: If terminal has a write method, use it
+                      if (typeof terminal.write === 'function') {
+                        terminal.write(`cd ${projectDir}\n`);
+                        terminal.write(`npm install\n`);
+                        terminal.write(`npm run ${runScript}\n`);
+                      } 
+                      // Option 2: If terminal has a sendText method, use it
+                      else if (typeof terminal.sendText === 'function') {
+                        terminal.sendText(`cd ${projectDir}`);
+                        terminal.sendText(`npm install`);
+                        terminal.sendText(`npm run ${runScript}`);
+                      }
+                      // Option 3: Dispatch custom event for terminal commands
+                      else {
+                        window.dispatchEvent(new CustomEvent('terminal:execute', {
+                          detail: {
+                            commands: [
+                              `cd ${projectDir}`,
+                              `npm install`,
+                              `npm run ${runScript}`
+                            ]
+                          }
+                        }));
+                      }
+                      
+                      console.log(`Running npm install and npm run ${runScript} in ${projectDir}`);
+                    } else {
+                      console.log("Terminal not found to run commands");
+                    }
+                  } catch (e) {
+                    console.error("Error running terminal commands:", e);
+                  }
+                };
+                
+                // Try to run commands after a delay
+                setTimeout(runCommands, 1000);
+              }, 1000);
               
               toast.success(`Successfully loaded ${Object.keys(processedFiles).length} files into the workbench`);
             } catch (error) {
@@ -209,7 +327,7 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
     return () => {
       window.removeEventListener('workbench:import-files', handleImportedFiles);
     };
-  }, [chatStarted]);
+  }, []);
 
   const onEditorChange = useCallback<OnEditorChange>((update) => {
     workbenchStore.setCurrentDocumentContent(update.content);
@@ -242,7 +360,7 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
   }, []);
 
   return (
-    chatStarted && (
+    effectiveChatStarted ? (
       <>
         <motion.div
           initial="closed"
@@ -269,7 +387,6 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                   <PanelHeaderButton
                     className="mr-1 text-sm"
                     onClick={saveAllFiles}
-                    title="Save all files"
                   >
                     <div className="i-ph:floppy-disk" />
                     Save All
@@ -333,7 +450,7 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
           </div>
         </motion.div>
       </>
-    )
+    ) : null
   );
 });
 
